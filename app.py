@@ -53,9 +53,9 @@ def get_question_with_choices(soup: BeautifulSoup, answer_key_dict: Dict[str, st
             curr_choice_letter = chr(i + ord('A'))
 
             if curr_choice_letter in answer_key_dict[question_num]:
-                output += f'- [x] {li.get_text()}\n'
+                output += f'- [x] {curr_choice_letter}. {li.get_text()}\n'
             else:
-                output += f'- [ ] {li.get_text()}\n'
+                output += f'- [ ] {curr_choice_letter}. {li.get_text()}\n'
 
         output += '\n'
 
