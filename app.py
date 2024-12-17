@@ -7,6 +7,7 @@ import argparse
 import sys
 from pprint import pprint
 from contextlib import ExitStack
+import shutil
 
 
 def create_answerkey_dict(soup: BeautifulSoup) -> Dict[str, str]:
@@ -49,24 +50,27 @@ def get_question_content(
     p_questions: ResultSet[Tag] = soup.find_all("p", {"class", "quiz"})
 
     for p in p_questions:
-        output += f"{p.get_text()}\n\n"
+        question_text = p.get_text()
+        output += f"{question_text}\n\n"
 
         a_tag = p.a
-        if not a_tag:
-            raise RuntimeError(
-                f"Unable to find anchor tag inside the question paragraph: {output}"
+        if a_tag is None:
+            raise ValueError(
+                f"Unable to find anchor tag inside the question paragraph for question: {question_text}"
             )
 
         href_attr = a_tag["href"]
         if isinstance(href_attr, list):
-            raise RuntimeError("Multiple hrefs found in anchor tag")
+            raise ValueError(
+                f"Multiple hrefs found in anchor tag for question: {question_text}"
+            )
 
-        volume_p_id = href_attr.split("#")[1][:-1]
+        a_explanation_id = href_attr.split("#")[1][:-1]
         question_num = a_tag.get_text()
 
         ol = p.find_next_sibling("ol", {"class", "lower-alpha"})
-        if ol is None:
-            raise RuntimeError("\tCouldn't find ordered list of answers")
+        if ol is None or not isinstance(ol, Tag):
+            raise ValueError(f"Ordered list not found for question: {question_text}")
 
         choice_list_items = ol.find_all("li")
 
@@ -79,9 +83,10 @@ def get_question_content(
             else:
                 output += f"- [ ] {curr_choice_letter}. {li.get_text()}\n"
 
-        p_explanation = explanation_soup.find("a", id=volume_p_id).find_parent(
+        p_explanation = explanation_soup.find("a", id=a_explanation_id).find_parent(
             "p", class_="quiz"
         )
+        p_explanation.a.extract()
         output += f"\n**Explanation**: {p_explanation}\n"
 
         output += "\n"
@@ -92,12 +97,19 @@ def get_question_content(
 def extract_necessary_files(epub_file_path: str, extraction_dir: str):
     filename_pattern = re.compile(r"OEBPS/xhtml/vol(1|2)_ch\d\d\.xhtml")
 
-    with zipfile.ZipFile(epub_file_path, "r") as zip_ref:
-        epub_filename_list = zip_ref.namelist()
+    try:
+        os.mkdir(extraction_dir)
+    except FileExistsError:
+        pass
 
-        for filename in epub_filename_list:
-            if filename_pattern.match(filename) or "appc" in filename:
-                zip_ref.extract(filename, extraction_dir)
+    with zipfile.ZipFile(epub_file_path, "r") as zip_ref:
+        file_paths = zip_ref.namelist()
+
+        for file_path in file_paths:
+            if filename_pattern.match(file_path) or "appc" in file_path:
+                filename = os.path.basename(file_path)
+                with open(os.path.join(extraction_dir, filename), "wb") as f:
+                    f.write(zip_ref.read(file_path))
 
 
 def chapter_has_no_quiz(chapter_filename: str) -> bool:
@@ -176,52 +188,49 @@ def main():
 
     extract_necessary_files(args.input_file, extraction_dir)
 
-    xhtml_dir_path = os.path.join(extraction_dir, "OEBPS/xhtml/")
-    xhtml_filename_list = sorted(os.listdir(xhtml_dir_path))
-    vol1_filename = "vol1_appc.xhtml"
-    vol2_filename = "vol2_appc.xhtml"
-    vol1_explanations_path = os.path.join(xhtml_dir_path, vol1_filename)
-    vol2_explanations_path = os.path.join(xhtml_dir_path, vol2_filename)
+    # xhtml_dir_path = os.path.join(extraction_dir, "OEBPS/xhtml/")
+    filenames = sorted(os.listdir(extraction_dir))
+    vol1_eplanations_filename = "vol1_appc.xhtml"
+    vol2_explanation_filename = "vol2_appc.xhtml"
+    vol1_explanations_filepath = os.path.join(extraction_dir, vol1_eplanations_filename)
+    vol2_explanations_filepath = os.path.join(extraction_dir, vol2_explanation_filename)
 
-    if vol1_filename not in xhtml_filename_list:
+    if vol1_eplanations_filename not in filenames:
         raise RuntimeError(
-            f"Volume 1 explantation file not found in extracted directory: {vol1_explanations_path}"
+            f"Volume 1 explantation file not found in extracted directory: {vol1_explanations_filepath}"
         )
 
-    if vol2_filename not in xhtml_filename_list:
+    if vol2_explanation_filename not in filenames:
         raise RuntimeError(
             "Volume 2 explantation file not found in extracted directory"
         )
 
     with ExitStack() as stack:
         output_file = stack.enter_context(open("test.md", "w"))
-        vol1_file = stack.enter_context(open(vol1_explanations_path))
-        vol2_file = stack.enter_context(open(vol2_explanations_path))
+        vol1_file = stack.enter_context(open(vol1_explanations_filepath))
+        vol2_file = stack.enter_context(open(vol2_explanations_filepath))
 
-        switched = False
+        is_vol2_soup = False
         explanation_soup = BeautifulSoup(vol1_file, "lxml-xml")
 
-        for xhtml_filename in xhtml_filename_list:
+        for filename in filenames:
             output = ""
-            xhtml_file_path = os.path.join(xhtml_dir_path, xhtml_filename)
-            curr_volume = get_curr_volume(xhtml_filename)
-            if curr_volume == 2 and not switched:
+            file_path = os.path.join(extraction_dir, filename)
+            curr_volume = get_curr_volume(filename)
+            if curr_volume == 2 and not is_vol2_soup:
                 explanation_soup = BeautifulSoup(vol2_file, "lxml-xml")
-                switched = True
-
-            # print(explanation_soup)
+                is_vol2_soup = True
 
             # skip chapters that dont have a quiz
-            if chapter_has_no_quiz(xhtml_filename):
+            if chapter_has_no_quiz(filename):
                 continue
 
-            if "appc" in xhtml_filename:
+            if "appc" in filename:
                 continue
 
-            with open(xhtml_file_path, "r", encoding="utf-8") as file:
+            with open(file_path, "r", encoding="utf-8") as f:
                 # Use lxml parser for XHTML
-                soup = BeautifulSoup(file, "lxml-xml")
-                # print(curr_volume)
+                soup = BeautifulSoup(f, "lxml-xml")
 
                 chapter_heading_text = get_chapter_heading(soup)
                 output += chapter_heading_text
